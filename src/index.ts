@@ -1,146 +1,131 @@
-import { watch, FSWatcher } from 'fs'
-import { exec, ChildProcess, ExecException } from 'child_process'
+import { existsSync, statSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { Git } from './git'
 
-class GitHubFolderSync {
-  private folderPath: string
-  private syncInterval: number
-  private git: Git
-  private readyForSync: boolean
-  private intervalId: NodeJS.Timer
-  private watcher: FSWatcher
+export { GitError } from './git'
 
-  constructor(
-    folderPath: string,
-    syncInterval: number,
-    gitHubRepoName: string,
-    gitHubToken: string,
-    gitHubUsername: string,
-    branchName: string
-  ) {
-    this.folderPath = folderPath
-    this.syncInterval = syncInterval
-    this.git = new Git(
-      folderPath,
-      gitHubRepoName,
-      gitHubToken,
-      gitHubUsername,
-      branchName
-    )
-    this.readyForSync = false
-    this.intervalId = null
-    this.watcher = null
-  }
-
-  start(): void {
-    if (!this.intervalId) {
-      this.git.initRepo()
-      this.watch()
-      this.intervalId = setInterval(() => this.sync(), this.syncInterval)
-    }
-  }
-
-  stop(): void {
-    clearInterval(this.intervalId)
-    this.intervalId = null
-
-    this.watcher.close()
-    this.watcher = null
-  }
-
-  async sync(): Promise<void> {
-    await this.git.pullFromGitHub()
-
-    if (this.readyForSync) {
-      await this.git.commitEverythingInSyncFolder()
-      await this.git.pushToGitHub()
-      this.readyForSync = false
-    }
-  }
-
-  private watch(): void {
-    if (!this.watcher)
-      this.watcher = watch(this.folderPath, () => (this.readyForSync = true))
-  }
-}
-
-class Git {
+export interface GitHubFolderSyncOptions {
+  /** Path of the local folder to sync. */
   folderPath: string
-  gitHubRepoName: string
-  gitHubToken: string
-  gitHubUsername: string
-  branchName: string
-
-  constructor(
-    folderPath: string,
-    gitHubRepoName: string,
-    gitHubToken: string,
-    gitHubUsername: string,
-    branchName: string
-  ) {
-    this.folderPath = folderPath
-    this.gitHubRepoName = gitHubRepoName
-    this.gitHubToken = gitHubToken
-    this.gitHubUsername = gitHubUsername
-    this.branchName = branchName
-  }
-
-  run(command: string): Promise<string | ChildProcess> {
-    return new Promise((resolve, reject) =>
-      exec(
-        `git ${command}`,
-        { cwd: this.folderPath },
-        (error: ExecException, stdout: string, stderr: string) =>
-          error || stderr ? reject(error || stderr) : resolve(stdout)
-      )
-    )
-  }
-
-  async initRepo(): Promise<void> {
-    if (!(await this.repoExists()))
-      await this.run('init').then((r) => console.log(r))
-  }
-
-  async repoExists(): Promise<boolean> {
-    return new Promise((resolve) => {
-      this.run('add').catch((error) => {
-        if (error.toString().includes('not a git repository')) resolve(false)
-        if (error.toString().includes('Nothing specified, nothing added'))
-          resolve(true)
-      })
-    })
-  }
-
-  async nothingToCommit(): Promise<boolean> {
-    return new Promise((resolve) => {
-      this.run('status').then((status: string) =>
-        resolve(status.includes('nothing to commit'))
-      )
-    })
-  }
-
-  async commitEverythingInSyncFolder(): Promise<void> {
-    if (!(await this.nothingToCommit()))
-      await this.run('add -A').then(
-        async (r) =>
-          await this.run(
-            `commit -m "github-folder-sync: ${new Date().toISOString()}"`
-          )
-      )
-  }
-
-  async pullFromGitHub(): Promise<void> {
-    await this.run(`branch -M ${this.branchName}`)
-    await this.run(
-      `pull https://${this.gitHubUsername}:${this.gitHubToken}@github.com/${this.gitHubUsername}/${this.gitHubRepoName}.git`
-    ).catch((e) => e)
-  }
-
-  async pushToGitHub(): Promise<void> {
-    await this.run(`branch -M ${this.branchName}`)
-    await this.run(
-      `push https://${this.gitHubUsername}:${this.gitHubToken}@github.com/${this.gitHubUsername}/${this.gitHubRepoName}.git`
-    ).catch((e) => e)
-  }
+  /** GitHub user or organization that owns the repository. */
+  owner: string
+  /** Repository name. */
+  repo: string
+  /** Personal access token with write access to the repository. */
+  token: string
+  /** Branch to sync with. Defaults to `main`. */
+  branch?: string
+  /** Time between syncs in milliseconds. Defaults to 5 minutes. */
+  interval?: number
+  /** Returns the message used for each commit. */
+  commitMessage?: () => string
+  /** Called when a scheduled sync fails. Defaults to `console.error`. */
+  onError?: (error: unknown) => void
 }
 
-export { GitHubFolderSync }
+export class GitHubFolderSync {
+  readonly folderPath: string
+  readonly branch: string
+  readonly interval: number
+  private readonly remoteUrl: string
+  private readonly git: Git
+  private readonly commitMessage: () => string
+  private readonly onError: (error: unknown) => void
+  private started = false
+  private timer: NodeJS.Timeout | undefined
+  private pending: Promise<void> | undefined
+
+  constructor(options: GitHubFolderSyncOptions) {
+    for (const key of ['folderPath', 'owner', 'repo', 'token'] as const) {
+      if (!options[key]) throw new TypeError(`"${key}" is required`)
+    }
+
+    this.folderPath = resolve(options.folderPath)
+    this.branch = options.branch ?? 'main'
+    this.interval = options.interval ?? 5 * 60_000
+    this.remoteUrl = `https://github.com/${options.owner}/${options.repo}.git`
+    this.git = new Git(this.folderPath, options.token)
+    this.commitMessage =
+      options.commitMessage ??
+      (() => `github-folder-sync: ${new Date().toISOString()}`)
+    this.onError =
+      options.onError ??
+      ((error) => console.error('[github-folder-sync]', error))
+
+    if (!(this.interval > 0))
+      throw new RangeError('"interval" must be a positive number')
+  }
+
+  get isRunning(): boolean {
+    return this.started
+  }
+
+  /** Runs a sync right away, then keeps syncing every `interval` ms. */
+  async start(): Promise<void> {
+    if (this.started) return
+    this.started = true
+    await this.tick()
+  }
+
+  /** Stops the schedule and waits for a sync in progress to finish. */
+  async stop(): Promise<void> {
+    this.started = false
+    clearTimeout(this.timer)
+    this.timer = undefined
+    await this.pending?.catch(() => {})
+  }
+
+  /**
+   * Commits local changes, merges changes from GitHub and pushes the result.
+   * Calling it while a sync is in progress returns the same promise.
+   */
+  sync(): Promise<void> {
+    this.pending ??= this.run().finally(() => (this.pending = undefined))
+    return this.pending
+  }
+
+  private async tick(): Promise<void> {
+    try {
+      await this.sync()
+    } catch (error) {
+      this.onError(error)
+    }
+    if (this.started && !this.timer) {
+      this.timer = setTimeout(() => {
+        this.timer = undefined
+        void this.tick()
+      }, this.interval)
+    }
+  }
+
+  private async run(): Promise<void> {
+    await this.ensureRepo()
+
+    if (await this.git.hasChanges()) {
+      await this.git.run('add', '--all')
+      await this.git.run('commit', '--message', this.commitMessage())
+    }
+
+    const remoteHead = await this.git.fetch(this.remoteUrl, this.branch)
+    if (remoteHead) await this.git.merge(remoteHead)
+
+    const localHead = await this.git.head()
+    if (localHead && localHead !== remoteHead)
+      await this.git.run(
+        'push',
+        this.remoteUrl,
+        `HEAD:refs/heads/${this.branch}`
+      )
+  }
+
+  private async ensureRepo(): Promise<void> {
+    if (
+      !existsSync(this.folderPath) ||
+      !statSync(this.folderPath).isDirectory()
+    )
+      throw new Error(`Folder not found: ${this.folderPath}`)
+
+    if (!existsSync(join(this.folderPath, '.git')))
+      await this.git.run('init', `--initial-branch=${this.branch}`)
+  }
+}

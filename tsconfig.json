@@ -1,8 +1,17 @@
 {
   "compilerOptions": {
-    "module": "ES2022",
-    "moduleResolution": "node",
-    "target": "ES2022"
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "strict": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "src",
+    "outDir": "dist"
   },
-  "include": ["src/**/*", "rollup.config.ts"]
+  "include": ["src"]
 }
