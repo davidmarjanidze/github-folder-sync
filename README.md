@@ -83,28 +83,6 @@ Git failures are thrown as `GitError`, which is also exported. It has `args`
 - The token is passed to git through environment variables. It isn't written
   to `.git/config` or added to remote URLs.
 
-## Migrating from 1.x
-
-The constructor takes an options object instead of positional arguments:
-
-```ts
-// 1.x
-new GitHubFolderSync(folderPath, interval, repo, token, username, branch)
-
-// 2.x
-new GitHubFolderSync({
-  folderPath,
-  interval,
-  repo,
-  token,
-  owner: username,
-  branch
-})
-```
-
-`start()` and `stop()` now return promises, and `start()` runs the first sync
-right away instead of waiting for the first interval.
-
 ## License
 
 ISC
