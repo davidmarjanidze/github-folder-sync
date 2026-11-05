@@ -1,9 +1,9 @@
 {
   "name": "github-folder-sync",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Keep a local folder in sync with a GitHub repository.",
   "license": "ISC",
-  "author": "Dato Marjanidze",
+  "author": "David Marjanidze",
   "homepage": "https://github.com/davidmarjanidze/github-folder-sync#readme",
   "repository": {
     "type": "git",
